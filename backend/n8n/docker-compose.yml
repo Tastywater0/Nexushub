@@ -1,0 +1,59 @@
+# ═══════════════════════════════════════════════════════════════
+# NexusHub Local Dev Stack
+# Runs: PostgreSQL + n8n automation engine
+# Usage: docker compose up -d
+# n8n UI: http://localhost:5678
+# ═══════════════════════════════════════════════════════════════
+version: '3.8'
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: nexushub-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nexushub
+      POSTGRES_USER: nexushub
+      POSTGRES_PASSWORD: nexushub_local_pw
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexushub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: nexushub-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=nexushub2026
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=Asia/Manila
+      # Env vars available inside n8n workflows
+      - NEXUSHUB_API=http://host.docker.internal:8080
+      - NEXUSHUB_ADMIN_TOKEN=paste-your-admin-jwt-here
+      - VIBER_BOT_TOKEN=paste-your-viber-bot-token-here
+      - VIBER_GROUP_ID=paste-your-viber-group-id-here
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  postgres_data:
+  n8n_data:

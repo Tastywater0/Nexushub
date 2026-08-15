@@ -1,0 +1,234 @@
+{
+  "_comment": "Import each workflow separately into n8n via Settings > Import Workflow",
+  "workflows": [
+
+    {
+      "name": "NexusHub — EOD Discrepancy Viber Alert",
+      "description": "Watches for new ESCALATED reconciliation records and sends a Viber message to the operations group",
+      "nodes": [
+        {
+          "name": "Cron — Check every 5 min",
+          "type": "n8n-nodes-base.cron",
+          "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] } }
+        },
+        {
+          "name": "GET /api/reconciliations — Escalated today",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "={{$env.NEXUSHUB_API}}/api/reconciliations",
+            "method": "GET",
+            "headers": { "Authorization": "Bearer ={{$env.NEXUSHUB_ADMIN_TOKEN}}" },
+            "queryParameters": { "status": "ESCALATED", "dateFrom": "={{$now.toFormat('yyyy-MM-dd')}}" }
+          }
+        },
+        {
+          "name": "IF — Any new escalations?",
+          "type": "n8n-nodes-base.if",
+          "parameters": {
+            "conditions": { "number": [{ "value1": "={{$json.length}}", "operation": "larger", "value2": 0 }] }
+          }
+        },
+        {
+          "name": "Viber — Send to ops group",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "https://chatapi.viber.com/pa/send_message",
+            "method": "POST",
+            "headers": { "X-Viber-Auth-Token": "={{$env.VIBER_BOT_TOKEN}}" },
+            "body": {
+              "receiver": "={{$env.VIBER_GROUP_ID}}",
+              "type": "text",
+              "text": "⚠ NexusHub ALERT\n\nEOD Discrepancy detected!\nBranch: {{$json[0].branch.name}}\nDate: {{$json[0].date.slice(0,10)}}\nVariance: ₱{{$json[0].cashVariance}}\n\nLogin to NexusHub to review:\nhttps://nexushub.vercel.app/reports"
+            }
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "NexusHub — Weekly Operations Summary",
+      "description": "Every Monday at 7 AM, sends a summary of the previous week to the admin email and Viber group",
+      "nodes": [
+        {
+          "name": "Cron — Monday 7 AM",
+          "type": "n8n-nodes-base.cron",
+          "parameters": { "rule": { "cronExpression": "0 7 * * 1" } }
+        },
+        {
+          "name": "GET dashboard summary",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "={{$env.NEXUSHUB_API}}/api/dashboard",
+            "method": "GET",
+            "headers": { "Authorization": "Bearer ={{$env.NEXUSHUB_ADMIN_TOKEN}}" }
+          }
+        },
+        {
+          "name": "GET transfer stats",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "={{$env.NEXUSHUB_API}}/api/transfers?status=APPROVED",
+            "method": "GET",
+            "headers": { "Authorization": "Bearer ={{$env.NEXUSHUB_ADMIN_TOKEN}}" }
+          }
+        },
+        {
+          "name": "POST weekly summary email",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "={{$env.NEXUSHUB_API}}/api/reports/weekly-email",
+            "method": "POST",
+            "headers": { "Authorization": "Bearer ={{$env.NEXUSHUB_ADMIN_TOKEN}}" },
+            "body": { "triggerSource": "n8n-weekly-cron" }
+          }
+        },
+        {
+          "name": "Viber — Weekly summary message",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "https://chatapi.viber.com/pa/send_message",
+            "method": "POST",
+            "headers": { "X-Viber-Auth-Token": "={{$env.VIBER_BOT_TOKEN}}" },
+            "body": {
+              "receiver": "={{$env.VIBER_GROUP_ID}}",
+              "type": "text",
+              "text": "📊 NexusHub Weekly Report\n\nPending transfers: {{$node['GET dashboard summary'].json.pendingTransfers}}\nEOD discrepancies this week: {{$node['GET dashboard summary'].json.weekDiscrepancies}}\nLow stock SKUs: {{$node['GET dashboard summary'].json.lowStockCount}}\n\nFull report sent to email ✓"
+            }
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "NexusHub — Daily EOD Reminder",
+      "description": "Fires at 5:30 PM on weekdays — reminds branch managers who haven't submitted EOD yet",
+      "nodes": [
+        {
+          "name": "Cron — 5:30 PM weekdays",
+          "type": "n8n-nodes-base.cron",
+          "parameters": { "rule": { "cronExpression": "30 17 * * 1-6" } }
+        },
+        {
+          "name": "GET today EOD status",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "={{$env.NEXUSHUB_API}}/api/dashboard",
+            "method": "GET",
+            "headers": { "Authorization": "Bearer ={{$env.NEXUSHUB_ADMIN_TOKEN}}" }
+          }
+        },
+        {
+          "name": "IF — EODs incomplete?",
+          "type": "n8n-nodes-base.if",
+          "parameters": {
+            "conditions": {
+              "number": [{
+                "value1": "={{$json.todayEODs}}",
+                "operation": "smaller",
+                "value2": "={{$json.totalEODs}}"
+              }]
+            }
+          }
+        },
+        {
+          "name": "Viber — EOD reminder",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "https://chatapi.viber.com/pa/send_message",
+            "method": "POST",
+            "headers": { "X-Viber-Auth-Token": "={{$env.VIBER_BOT_TOKEN}}" },
+            "body": {
+              "receiver": "={{$env.VIBER_GROUP_ID}}",
+              "type": "text",
+              "text": "📋 NexusHub Reminder\n\n{{$json.totalEODs - $json.todayEODs}} branch(es) have not submitted EOD closing yet.\n\nPlease complete before 7 PM:\nhttps://nexushub.vercel.app/eod"
+            }
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "NexusHub — Low Stock Auto-Alert",
+      "description": "Checks inventory at 9 AM daily and alerts if any branch has critical stockouts",
+      "nodes": [
+        {
+          "name": "Cron — 9 AM daily",
+          "type": "n8n-nodes-base.cron",
+          "parameters": { "rule": { "cronExpression": "0 9 * * *" } }
+        },
+        {
+          "name": "GET inventory summary",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "={{$env.NEXUSHUB_API}}/api/dashboard",
+            "method": "GET",
+            "headers": { "Authorization": "Bearer ={{$env.NEXUSHUB_ADMIN_TOKEN}}" }
+          }
+        },
+        {
+          "name": "IF — Stockouts exist?",
+          "type": "n8n-nodes-base.if",
+          "parameters": {
+            "conditions": { "number": [{ "value1": "={{$json.stockoutCount}}", "operation": "larger", "value2": 0 }] }
+          }
+        },
+        {
+          "name": "Viber — Stockout alert",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "https://chatapi.viber.com/pa/send_message",
+            "method": "POST",
+            "headers": { "X-Viber-Auth-Token": "={{$env.VIBER_BOT_TOKEN}}" },
+            "body": {
+              "receiver": "={{$env.VIBER_GROUP_ID}}",
+              "type": "text",
+              "text": "📦 NexusHub Stock Alert\n\n{{$json.stockoutCount}} SKU(s) are OUT OF STOCK.\n{{$json.lowStockCount}} SKU(s) are below reorder point.\n\nCheck the velocity engine for transfer recommendations:\nhttps://nexushub.vercel.app/velocity"
+            }
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "NexusHub — Transfer Approval Reminder",
+      "description": "If there are high-priority pending transfers for more than 24 hours, ping the manager",
+      "nodes": [
+        {
+          "name": "Cron — 10 AM daily",
+          "type": "n8n-nodes-base.cron",
+          "parameters": { "rule": { "cronExpression": "0 10 * * *" } }
+        },
+        {
+          "name": "GET pending transfers",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "={{$env.NEXUSHUB_API}}/api/transfers?status=PENDING&priority=HIGH",
+            "method": "GET",
+            "headers": { "Authorization": "Bearer ={{$env.NEXUSHUB_ADMIN_TOKEN}}" }
+          }
+        },
+        {
+          "name": "IF — Stale high-priority transfers?",
+          "type": "n8n-nodes-base.if",
+          "parameters": {
+            "conditions": { "number": [{ "value1": "={{$json.length}}", "operation": "larger", "value2": 0 }] }
+          }
+        },
+        {
+          "name": "Viber — Transfer reminder",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "url": "https://chatapi.viber.com/pa/send_message",
+            "method": "POST",
+            "headers": { "X-Viber-Auth-Token": "={{$env.VIBER_BOT_TOKEN}}" },
+            "body": {
+              "receiver": "={{$env.VIBER_GROUP_ID}}",
+              "type": "text",
+              "text": "⇄ NexusHub Transfer Queue\n\n{{$json.length}} HIGH PRIORITY transfer(s) are awaiting approval.\n\nApprove now to prevent stockouts:\nhttps://nexushub.vercel.app/velocity"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,382 @@
+// NexusHub — Prisma Schema
+// Run: npx prisma migrate dev --name init
+// Run: npx prisma db seed
+// View: npx prisma studio
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ─────────────────────────────────────────────────
+enum Role {
+  BRANCH_MANAGER
+  SHIFT_SUPERVISOR
+  SALES_STAFF
+  FIELD_AUDITOR
+  SUPERADMIN
+}
+
+enum Brand {
+  INGCO
+  WADFOW
+}
+
+enum TransferStatus {
+  PENDING
+  APPROVED
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+enum Priority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum ReconStatus {
+  DRAFT
+  SUBMITTED
+  ESCALATED
+  CLEARED
+}
+
+enum AuditType {
+  ROUTINE
+  EVENT_PROMO
+  COMPLIANCE
+}
+
+enum AuditStatus {
+  IN_PROGRESS
+  SUBMITTED
+  REVIEWED
+}
+
+enum CheckStatus {
+  PENDING
+  PASS
+  FAIL
+  NA
+}
+
+// ─── MODELS ─────────────────────────────────────────────────
+model Branch {
+  id        String   @id @default(cuid())
+  code      String   @unique  // DG, SC, LG, AL, ML
+  name      String
+  address   String   @default("")
+  region    String   @default("Region I")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  users             User[]
+  employees         Employee[]
+  inventoryItems    InventoryItem[]
+  outboundTransfers StockTransfer[]     @relation("FromBranch")
+  inboundTransfers  StockTransfer[]     @relation("ToBranch")
+  reconciliations   DailyReconciliation[]
+  auditChecklists   AuditChecklist[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  employeeId   String   @unique
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role
+  branchId     String
+  branch       Branch   @relation(fields: [branchId], references: [id])
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  employee               Employee?             @relation(fields: [employeeId], references: [employeeId])
+  reconciledByMe          DailyReconciliation[] @relation("ReconciledBy")
+  supervisedByMe          DailyReconciliation[] @relation("SupervisedBy")
+  approvedTransfers      StockTransfer[]
+  auditsByMe              AuditChecklist[]
+  inventoryLogs           InventoryLog[]
+  auditLogs               AuditLog[]
+  proposedChangeRequests ChangeRequest[]       @relation("proposer")
+  reviewedChangeRequests ChangeRequest[]       @relation("reviewer")
+}
+
+model Product {
+  id           String   @id @default(cuid())
+  sku          String   @unique
+  name         String
+  brand        Brand
+  category     String
+  unit         String   @default("pcs")
+  srp          Decimal
+  reorderPoint Int      @default(5)
+  isHighValue  Boolean  @default(false)  // requires mandatory physical count at EOD
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  inventoryItems    InventoryItem[]
+  transferLineItems TransferLineItem[]
+  reconLineItems    ReconciliationLineItem[]
+  saleLineItems     SaleLineItem[]
+}
+
+model InventoryItem {
+  id             String   @id @default(cuid())
+  productId      String
+  product        Product  @relation(fields: [productId], references: [id])
+  branchId       String
+  branch         Branch   @relation(fields: [branchId], references: [id])
+  quantityOnHand Int      @default(0)
+  lastCountedAt  DateTime @default(now())
+  lastSoldAt     DateTime?
+  velocity30d    Float    @default(0)  // units sold last 30 days, recomputed nightly
+  updatedAt      DateTime @updatedAt
+
+  logs InventoryLog[]
+
+  @@unique([productId, branchId])
+}
+
+model InventoryLog {
+  id              String        @id @default(cuid())
+  inventoryItemId String
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
+  userId          String
+  user            User          @relation(fields: [userId], references: [id])
+  previousQty     Int
+  newQty          Int
+  reason          String        @default("Manual adjustment")
+  createdAt       DateTime      @default(now())
+}
+
+model StockTransfer {
+  id            String         @id @default(cuid())
+  fromBranchId  String
+  fromBranch    Branch         @relation("FromBranch", fields: [fromBranchId], references: [id])
+  toBranchId    String
+  toBranch      Branch         @relation("ToBranch", fields: [toBranchId], references: [id])
+  status        TransferStatus @default(PENDING)
+  priority      Priority       @default(MEDIUM)
+  recommendedBy String         // "SYSTEM" or userId
+  approvedById  String?
+  approvedBy    User?          @relation(fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  completedAt   DateTime?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  lineItems TransferLineItem[]
+}
+
+model TransferLineItem {
+  id         String        @id @default(cuid())
+  transferId String
+  transfer   StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product       @relation(fields: [productId], references: [id])
+  quantity   Int
+}
+
+model DailyReconciliation {
+  id              String      @id @default(cuid())
+  branchId        String
+  branch          Branch      @relation(fields: [branchId], references: [id])
+  reconciledById  String
+  reconciledBy    User        @relation("ReconciledBy", fields: [reconciledById], references: [id])
+  supervisorId    String?
+  supervisor      User?       @relation("SupervisedBy", fields: [supervisorId], references: [id])
+  date            DateTime
+  shiftEnd        DateTime
+  cashExpected    Decimal
+  cashPhysical    Decimal
+  cashVariance    Decimal
+  digitalExpected Decimal     @default(0)
+  digitalActual   Decimal     @default(0)
+  digitalVariance Decimal     @default(0)
+  hasDiscrepancy  Boolean     @default(false)
+  supervisorSig   String?
+  supervisorNote  String?
+  status          ReconStatus @default(DRAFT)
+  createdAt       DateTime    @default(now())
+
+  lineItems ReconciliationLineItem[]
+}
+
+model ReconciliationLineItem {
+  id               String              @id @default(cuid())
+  reconciliationId String
+  reconciliation   DailyReconciliation @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+  productId        String
+  product          Product             @relation(fields: [productId], references: [id])
+  expectedQty      Int
+  physicalQty      Int
+  variance         Int
+}
+
+model AuditChecklist {
+  id          String      @id @default(cuid())
+  branchId    String
+  branch      Branch      @relation(fields: [branchId], references: [id])
+  auditorId   String
+  auditor     User        @relation(fields: [auditorId], references: [id])
+  auditType   AuditType   @default(ROUTINE)
+  eventName   String?
+  date        DateTime    @default(now())
+  score       Int?
+  status      AuditStatus @default(IN_PROGRESS)
+  createdAt   DateTime    @default(now())
+
+  items AuditChecklistItem[]
+}
+
+model AuditChecklistItem {
+  id          String         @id @default(cuid())
+  checklistId String
+  checklist   AuditChecklist @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+  category    String
+  itemText    String
+  status      CheckStatus    @default(PENDING)
+  notes       String?
+  photoUrl    String?
+}
+
+// Sales data — populated by POS integration or manual import
+// Used to compute velocity30d in the nightly cron job
+model Sale {
+  id        String   @id @default(cuid())
+  branchId  String
+  date      DateTime @default(now())
+  total     Decimal
+  createdAt DateTime @default(now())
+
+  lineItems SaleLineItem[]
+}
+
+model SaleLineItem {
+  id        String  @id @default(cuid())
+  saleId    String
+  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+  unitPrice Decimal
+  total     Decimal
+}
+
+model Employee {
+  id              String   @id @default(cuid())
+  employeeId      String   @unique   // ADMIN001 style
+  firstName       String
+  lastName        String
+  branchId        String?
+  branch          Branch?  @relation(fields: [branchId], references: [id])
+  position        String
+  department      String
+  dateHired       DateTime
+  employmentStatus String  @default("REGULAR") // PROBATIONARY | REGULAR | RESIGNED | TERMINATED
+  dateSeparated   DateTime?
+
+  // Gov't IDs — encrypt at column level (see Risks)
+  tin             String?
+  sssNo           String?
+  philhealthNo    String?
+  hdmfNo          String?
+
+  // Bank details
+  bankName        String?
+  bankAccountName String?
+  bankAccountNo   String?
+
+  basicSalary     Decimal  @db.Decimal(10,2)
+  allowance       Decimal  @default(0) @db.Decimal(10,2)
+
+  documents       EmployeeDocument[]
+  payrollRuns     PayrollRun[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User?
+}
+
+model EmployeeDocument {
+  id          String   @id @default(cuid())
+  employeeId  String
+  employee    Employee @relation(fields: [employeeId], references: [id])
+  docType     String   // CONTRACT | RESUME | VALID_ID | NBI_CLEARANCE | MEDICAL | OTHER
+  fileUrl     String   // S3/local storage path
+  uploadedAt  DateTime @default(now())
+}
+
+model PayrollRun {
+  id                String   @id @default(cuid())
+  employeeId        String
+  employee          Employee @relation(fields: [employeeId], references: [id])
+  payrollDate       DateTime
+  periodStart       DateTime
+  periodEnd         DateTime
+
+  basic             Decimal @db.Decimal(10,2)
+  deMinimis         Decimal @default(0) @db.Decimal(10,2)
+  lateUndertimeMins Int     @default(0)
+  lateUndertimeAmt  Decimal @default(0) @db.Decimal(10,2)
+  absenceDays       Decimal @default(0) @db.Decimal(4,2)
+  absenceAmt        Decimal @default(0) @db.Decimal(10,2)
+  allowance         Decimal @default(0) @db.Decimal(10,2)
+
+  sssEe             Decimal @default(0) @db.Decimal(10,2)
+  sssMpf            Decimal @default(0) @db.Decimal(10,2)
+  philhealthEe      Decimal @default(0) @db.Decimal(10,2)
+  hdmfEe            Decimal @default(0) @db.Decimal(10,2)
+  withholdingTax    Decimal @default(0) @db.Decimal(10,2)
+
+  totalComp         Decimal @db.Decimal(10,2)
+  totalDeductions   Decimal @db.Decimal(10,2)
+  netPay            Decimal @db.Decimal(10,2)
+
+  createdAt         DateTime @default(now())
+  @@unique([employeeId, periodStart, periodEnd])
+}
+
+model AuditChecklistTemplate {
+  id          String   @id @default(cuid())
+  auditType   String   // ROUTINE | EVENT_PROMO | COMPLIANCE | CASH_COUNT | SAFETY | MERCHANDISING
+  itemLabel   String
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  entityType  String
+  entityId    String
+  action      String   // CREATE | UPDATE | DELETE
+  changedData Json
+  changedById String
+  changedBy   User     @relation(fields: [changedById], references: [id])
+  createdAt   DateTime @default(now())
+}
+
+model ChangeRequest {
+  id            String   @id @default(cuid())
+  entityType    String   // EMPLOYEE | PAYROLL_RUN | AUDIT_TEMPLATE | INVENTORY_ADJUSTMENT
+  entityId      String?  // null if this is a CREATE
+  action        String   // CREATE | UPDATE | DELETE
+  proposedData  Json     // the diff/patch being requested
+  previousData  Json?    // snapshot of current state, for diff display
+  proposedById  String
+  proposedBy    User     @relation("proposer", fields: [proposedById], references: [id])
+  status        String   @default("PENDING") // PENDING | APPROVED | REJECTED
+  reviewedById  String?
+  reviewedBy    User?    @relation("reviewer", fields: [reviewedById], references: [id])
+  reviewNote    String?
+  createdAt     DateTime @default(now())
+  reviewedAt    DateTime?
+}
+
