@@ -450,11 +450,26 @@ button{cursor:pointer}
 /* ═══════════════════════════════════════════════
    API CONFIGURATION & AUTH
    ═══════════════════════════════════════════════ */
-// Dynamically resolve the backend URL
-let API_BASE = localStorage.getItem('nexushub_api_url') ||
-  (window.location.hostname === 'localhost'
-    ? 'http://localhost:8080/api'
-    : 'https://nexushub-7cew.onrender.com/api');
+// NexusHub API configuration
+// Local development talks to the local Fastify server.
+// Production (Vercel) talks directly to the Render backend.
+const PRODUCTION_API_BASE = 'https://nexushub-7cew.onrender.com/api';
+const LOCAL_API_BASE = 'http://localhost:8080/api';
+
+function normalizeApiBase(url) {
+  if (!url) return '';
+  return url.trim().replace(/\/+$/, '');
+}
+
+const storedApiBase = normalizeApiBase(localStorage.getItem('nexushub_api_url'));
+const isLocalHost = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
+// Ignore the old same-origin '/api' setting from previous deployments.
+// It cannot reach the Render backend when the frontend is hosted on Vercel.
+let API_BASE = storedApiBase && storedApiBase !== '/api'
+  ? storedApiBase
+  : (isLocalHost ? LOCAL_API_BASE : PRODUCTION_API_BASE);
+
 let AUTH_TOKEN = localStorage.getItem('nexushub_token') || '';
 
 // JWT payload decoder helper
@@ -473,30 +488,69 @@ function decodeJwt(token) {
 
 // Global API Fetch wrapper
 async function api(path, options = {}) {
-  const res = await fetch(API_BASE + path, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(AUTH_TOKEN ? { Authorization: 'Bearer ' + AUTH_TOKEN } : {}),
-      ...(options.headers || {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-  
+  const url = API_BASE + path;
+  const isLoginRequest = path === '/auth/login';
+
+  let res;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(AUTH_TOKEN ? { Authorization: 'Bearer ' + AUTH_TOKEN } : {}),
+        ...(options.headers || {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+  } catch (networkError) {
+    console.error('NexusHub API connection failed:', networkError);
+    throw new Error(
+      `Unable to connect to NexusHub backend at ${API_BASE}. ` +
+      `Check that the Render service is running and CORS allows ${window.location.origin}.`
+    );
+  }
+
   if (res.status === 401) {
+    // A failed login should be handled by the login form itself.
+    // Do not redirect/re-render the login page while it is already submitting.
+    if (isLoginRequest) {
+      let message = 'Invalid Employee ID or password';
+      try {
+        const data = await res.json();
+        message = data?.error || message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+
     AUTH_TOKEN = '';
     localStorage.removeItem('nexushub_token');
     state.currentUser = null;
     navigate('login');
-    return null;
+    throw new Error('Your session has expired. Please sign in again.');
   }
-  
+
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || 'Request failed');
+    let message = `Request failed (${res.status})`;
+    try {
+      const data = await res.json();
+      message = data?.error || data?.message || message;
+    } catch (_) {
+      try {
+        const text = await res.text();
+        if (text) message = text;
+      } catch (_) {}
+    }
+    throw new Error(message);
   }
-  
-  return res.json();
+
+  if (res.status === 204) return null;
+
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return res.json();
+  }
+
+  return res.text();
 }
 
 // Convert backend inventory items array to the frontend PRODUCTS format
@@ -1144,12 +1198,21 @@ async function handleLogin(e) {
       body: { employeeId, password }
     });
 
-    if (res && res.token) {
-      localStorage.setItem('nexushub_token', res.token);
-      AUTH_TOKEN = res.token;
-      
-      const payload = decodeJwt(res.token);
-      state.currentUser = {
+    if (!res || !res.token) {
+      throw new Error('Login succeeded but the backend did not return an authentication token.');
+    }
+
+    localStorage.setItem('nexushub_token', res.token);
+    AUTH_TOKEN = res.token;
+
+    const payload = decodeJwt(res.token);
+    if (!payload) {
+      localStorage.removeItem('nexushub_token');
+      AUTH_TOKEN = '';
+      throw new Error('The backend returned an invalid authentication token.');
+    }
+
+    state.currentUser = {
         id: payload.id,
         employeeId: payload.employeeId,
         name: payload.name,
@@ -1160,16 +1223,15 @@ async function handleLogin(e) {
         branch: payload.branchCode,
         branchId: payload.branchId,
         initials: initials(payload.name)
-      };
-      
-      // Update UI elements
-      $('sb-avatar').textContent = state.currentUser.initials;
-      $('sb-uname').textContent = state.currentUser.name;
-      $('sb-urole').textContent = state.currentUser.role + ' · ' + state.currentUser.branch;
-      
-      toast('Welcome back to NexusHub! ✓');
-      navigate('dashboard');
-    }
+    };
+
+    // Update UI elements
+    $('sb-avatar').textContent = state.currentUser.initials;
+    $('sb-uname').textContent = state.currentUser.name;
+    $('sb-urole').textContent = state.currentUser.role + ' · ' + state.currentUser.branch;
+
+    toast('Welcome back to NexusHub! ✓');
+    navigate('dashboard');
   } catch (err) {
     errEl.style.display = 'flex';
     errMsgEl.textContent = err.message || 'Invalid Employee ID or password';
@@ -2908,7 +2970,7 @@ function renderSettings(){
     <div class="card">
       <div class="fgroup">
         <label class="flabel">Fastify API Backend URL</label>
-        <input class="finput" id="s-api-url" value="${esc(API_BASE)}" placeholder="e.g. http://localhost:8080/api">
+        <input class="finput" id="s-api-url" value="${esc(API_BASE)}" placeholder="e.g. https://nexushub-7cew.onrender.com/api">
       </div>
       <button class="btn btn-primary btn-sm" onclick="saveApiSettings()">Save API Configuration</button>
     </div>
@@ -2948,7 +3010,7 @@ function renderSettings(){
         Multi-branch operations platform<br>
         Boyztoys Corp · Pangasinan, Philippines<br>
         INGCO &amp; WADFOW distributors<br><br>
-        Built for deployment on Vercel (frontend) + Railway (backend + PostgreSQL).
+        Built for deployment on Vercel (frontend) + Render (backend) + PostgreSQL.
       </div>
     </div>
   </div>
@@ -2966,8 +3028,12 @@ function saveSettingsUser(){
 }
 
 function saveApiSettings() {
-  const url = $('s-api-url').value.trim();
-  if(!url){toast('Please enter a valid API URL');return;}
+  let url = normalizeApiBase($('s-api-url').value);
+  if (!url) { toast('Please enter a valid API URL'); return; }
+
+  // Allow users to paste either the backend root or the /api URL.
+  if (!url.endsWith('/api')) url += '/api';
+
   localStorage.setItem('nexushub_api_url', url);
   API_BASE = url;
   toast('API base URL updated successfully ✓');
