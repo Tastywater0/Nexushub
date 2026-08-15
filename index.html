@@ -451,8 +451,10 @@ button{cursor:pointer}
    API CONFIGURATION & AUTH
    ═══════════════════════════════════════════════ */
 // Dynamically resolve the backend URL
-let API_BASE = localStorage.getItem('nexushub_api_url') || 
-  (window.location.origin.includes('localhost') ? 'http://localhost:8080/api' : '/api');
+let API_BASE = localStorage.getItem('nexushub_api_url') ||
+  (window.location.hostname === 'localhost'
+    ? 'http://localhost:8080/api'
+    : 'https://nexushub-7cew.onrender.com/api');
 let AUTH_TOKEN = localStorage.getItem('nexushub_token') || '';
 
 // JWT payload decoder helper
